@@ -34,7 +34,14 @@ export default async function handler(req, res) {
 
 async function handleMessage(msg) {
   const chatId = String(msg.chat.id);
-  if (process.env.TELEGRAM_CHAT_ID && chatId !== String(process.env.TELEGRAM_CHAT_ID)) return;
+
+  if (!process.env.TELEGRAM_CHAT_ID) {
+    process.env.TELEGRAM_CHAT_ID = chatId;
+    console.log('adopted chat id', chatId);
+  } else if (chatId !== String(process.env.TELEGRAM_CHAT_ID)) {
+    console.log('rejected chat', chatId, 'expected', process.env.TELEGRAM_CHAT_ID);
+    return send('This bot is locked to another chat.', { chatId });
+  }
 
   let text = msg.text || msg.caption || '';
 
