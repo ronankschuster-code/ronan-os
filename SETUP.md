@@ -148,6 +148,7 @@ Commands: `/today` `/tomorrow` `/week` `/tasks` `/inbox` `/due` `/quiet` `/loud`
 
 **Bot silent.** Open `https://api.telegram.org/bot<TOKEN>/getWebhookInfo` and read `last_error_message`.
 
+
 **"Service account auth failed".** The private key got mangled. Re-copy it from the JSON with the `\n` sequences intact.
 
 **Bot works but the calendar never changes.** `GOOGLE_CALENDAR_ID` is still `primary`, or you never shared the calendar with the service account email.
