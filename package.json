@@ -1,0 +1,13 @@
+{
+  "name": "ronan-os",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Personal operating system. Telegram front end, Google Calendar spine, Supabase task layer.",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "setup:webhook": "node scripts/set-webhook.js",
+    
+    "test:tick": "node scripts/test-tick.js"
+  }
+}
