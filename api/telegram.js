@@ -16,20 +16,48 @@ export default async function handler(req, res) {
     return res.status(401).json({ ok: false });
   }
 
-  const update = req.body;
+  const update = await readJsonBody(req);
+  console.log('update keys:', update ? Object.keys(update).join(',') : 'NULL BODY');
 
-  // Do the work BEFORE responding. On Vercel the execution context can be
-  // frozen the instant the response is sent, so anything awaited after
-  // res.json() is not guaranteed to run.
+  if (!update) return res.status(200).json({ ok: true });
+
   try {
     if (update.callback_query) await handleCallback(update.callback_query);
     else if (update.message) await handleMessage(update.message);
+    else console.log('no message or callback_query in update');
   } catch (err) {
     console.error('handler error', err);
     try { await send(`Something broke: ${esc(String(err.message || err))}`); } catch {}
   }
 
   return res.status(200).json({ ok: true });
+}
+
+/** Get a parsed JSON object out of the request no matter how Vercel framed it. */
+async function readJsonBody(req) {
+  const b = req.body;
+
+  if (b && typeof b === 'object' && !Buffer.isBuffer(b)) return b;
+
+  let raw = null;
+  if (Buffer.isBuffer(b)) raw = b.toString('utf8');
+  else if (typeof b === 'string' && b.length) raw = b;
+
+  if (raw === null) {
+    raw = await new Promise((resolve) => {
+      let data = '';
+      req.on('data', (c) => { data += c; });
+      req.on('end', () => resolve(data));
+      req.on('error', () => resolve(''));
+      setTimeout(() => resolve(data), 5000);
+    });
+  }
+
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) {
+    console.error('body was not JSON:', String(raw).slice(0, 200));
+    return null;
+  }
 }
 
 async function handleMessage(msg) {
@@ -51,6 +79,8 @@ async function handleMessage(msg) {
     else return send('Voice transcription is not configured. Use your keyboard mic instead.');
   }
   if (!text.trim()) return;
+
+  console.log('handling text:', text);
 
   if (text.startsWith('/')) return handleCommand(text, chatId);
 
