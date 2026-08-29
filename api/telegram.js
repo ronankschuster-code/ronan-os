@@ -1,23 +1,14 @@
 // Telegram webhook. Every inbound message lands here.
-//
-// Flow:
-//   1. Is this a reply to a question the bot asked? Handle that first.
-//   2. Is it a button press? Handle the callback.
-//   3. Otherwise route it through Claude and execute.
-//
-// Hard rule: capture never fails. If routing breaks, the raw text still gets
-// saved to the Inbox so nothing Ronan says is ever lost.
 
 import { route, buildContext } from '../lib/brain.js';
 import { send, answerCallback, transcribeVoice, esc, editMessage } from '../lib/telegram.js';
 import * as cal from '../lib/calendar.js';
 import * as db from '../lib/db.js';
-import { fmtDate, fmtTime, untilText, startOfDay, endOfDay, addDays, dayKey } from '../lib/time.js';
+import { fmtDate, fmtTime, startOfDay, endOfDay, addDays, dayKey } from '../lib/time.js';
 
 export const config = { runtime: 'nodejs' };
 
 export default async function handler(req, res) {
-  // Telegram retries aggressively on non-200. Always ack fast.
   if (req.method !== 'POST') return res.status(200).json({ ok: true });
 
   const secret = req.headers['x-telegram-bot-api-secret-token'];
@@ -26,18 +17,20 @@ export default async function handler(req, res) {
   }
 
   const update = req.body;
-  res.status(200).json({ ok: true });   // ack immediately, then work
 
+  // Do the work BEFORE responding. On Vercel the execution context can be
+  // frozen the instant the response is sent, so anything awaited after
+  // res.json() is not guaranteed to run.
   try {
-    if (update.callback_query) return await handleCallback(update.callback_query);
-    if (update.message) return await handleMessage(update.message);
+    if (update.callback_query) await handleCallback(update.callback_query);
+    else if (update.message) await handleMessage(update.message);
   } catch (err) {
     console.error('handler error', err);
     try { await send(`Something broke: ${esc(String(err.message || err))}`); } catch {}
   }
-}
 
-// ---------------------------------------------------------------------------
+  return res.status(200).json({ ok: true });
+}
 
 async function handleMessage(msg) {
   const chatId = String(msg.chat.id);
@@ -48,20 +41,18 @@ async function handleMessage(msg) {
   if (msg.voice || msg.audio) {
     const t = await transcribeVoice((msg.voice || msg.audio).file_id);
     if (t) text = t;
-    else return send('Voice transcription is not configured. Use your keyboard mic instead, it types straight into Telegram and costs nothing.');
+    else return send('Voice transcription is not configured. Use your keyboard mic instead.');
   }
   if (!text.trim()) return;
 
   if (text.startsWith('/')) return handleCommand(text, chatId);
 
-  // Is he answering a question the bot asked?
   const pending = await db.getPendingReply(chatId);
   if (pending) {
     const consumed = await handlePendingReply(pending, text, chatId);
     if (consumed) return;
   }
 
-  // Give the model just enough calendar context to resolve references.
   let contextBlob = '';
   try {
     const upcoming = await cal.listEvents(new Date(), addDays(new Date(), 14), { maxResults: 60 });
@@ -72,15 +63,12 @@ async function handleMessage(msg) {
   try {
     intent = await route(text, { contextBlob });
   } catch (e) {
-    // Routing died. Capture anyway. This is the promise: nothing gets lost.
     await db.addTask({ title: text.slice(0, 200), bucket: 'inbox' });
     return send('Could not parse that, so I dropped it in your Inbox verbatim. Nothing lost.');
   }
 
   return execute(intent, chatId, text);
 }
-
-// ---------------------------------------------------------------------------
 
 async function execute(intent, chatId, rawText) {
   switch (intent.intent) {
@@ -129,10 +117,9 @@ async function execute(intent, chatId, rawText) {
           keyboard: matches.slice(0, 5).map(t => [{ text: t.title.slice(0, 60), callback_data: `done_task:${t.id}` }]),
         });
       }
-      // Maybe it's a calendar block, not a task.
       const evs = await cal.findByTitle(intent.target || rawText, { days: 3 });
       if (evs.length) {
-        return send(`That looks like a calendar block, not a task. Nothing to check off, it just passes.\nFound: <b>${esc(evs[0].title)}</b>`);
+        return send(`That looks like a calendar block, not a task.\nFound: <b>${esc(evs[0].title)}</b>`);
       }
       return send('Could not find that. Try /tasks to see what is open.');
     }
@@ -182,8 +169,6 @@ async function execute(intent, chatId, rawText) {
   }
 }
 
-// ---------------------------------------------------------------------------
-
 async function runQuery(kind) {
   const now = new Date();
 
@@ -227,8 +212,6 @@ async function runQuery(kind) {
   return send(out.trim());
 }
 
-// ---------------------------------------------------------------------------
-
 async function handleCommand(text, chatId) {
   const cmd = text.split(/\s+/)[0].toLowerCase();
   const map = {
@@ -250,11 +233,9 @@ async function handleCommand(text, chatId) {
     '/today /tomorrow /week\n' +
     '/tasks /inbox /due\n' +
     '/quiet /loud\n\n' +
-    'Or just talk to it. "gym at 5", "remind me to email Audrey", "move my Connect block to Sunday", "what is due this week".'
+    'Or just talk to it. "gym at 5", "remind me to email Audrey", "what is due this week".'
   );
 }
-
-// ---------------------------------------------------------------------------
 
 async function handleCallback(cb) {
   const chatId = String(cb.message.chat.id);
@@ -274,7 +255,6 @@ async function handleCallback(cb) {
     return editMessage(chatId, cb.message.message_id, 'Deleted.');
   }
 
-  // Evening sweep buttons
   if (action === 'blk_done') {
     await db.resolveBlockRun(arg, { status: 'done' });
     await answerCallback(cb.id, 'Nice');
@@ -288,7 +268,7 @@ async function handleCallback(cb) {
     const slots = await cal.findFreeSlots(60, { days: 5 });
     if (!slots.length) {
       await db.resolveBlockRun(arg, { status: 'skipped' });
-      return editMessage(chatId, cb.message.message_id, 'No free slots in the next 5 days. Left it alone.');
+      return editMessage(chatId, cb.message.message_id, 'No free slots in the next 5 days.');
     }
     const slot = slots[0];
     const title = run?.title || 'Rescheduled block';
@@ -313,21 +293,17 @@ async function handleCallback(cb) {
   await answerCallback(cb.id);
 }
 
-// ---------------------------------------------------------------------------
-
 async function handlePendingReply(pending, text, chatId) {
-  // Reserved for multi-turn flows. Currently the sweep uses buttons, so
-  // a free-text message is always treated as a new command.
   await db.clearPendingReply(chatId);
   return false;
 }
 
 function colorFor(bucket) {
   return ({
-    school: '7',      // blue
-    pulseboard: '6',  // tangerine
-    lxa: '3',         // grape
-    errand: '8',      // graphite
-    personal: '2',    // sage
+    school: '7',
+    pulseboard: '6',
+    lxa: '3',
+    errand: '8',
+    personal: '2',
   })[bucket];
 }
