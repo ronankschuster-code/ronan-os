@@ -1,0 +1,21 @@
+name: ronan-os heartbeat
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping tick
+        run: |
+          code=$(curl -sS -o /tmp/out.json -w '%{http_code}' \
+            -X POST "${{ secrets.APP_URL }}/api/cron/tick" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            --max-time 60)
+          echo "HTTP $code"
+          cat /tmp/out.json
+          if [ "$code" != "200" ]; then exit 1; fi
